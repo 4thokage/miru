@@ -1,0 +1,29 @@
+services:
+  postgres:
+    image: postgres:18.3-trixie
+    container_name: manga_db
+    environment:
+      POSTGRES_USER: ZeMiru
+      POSTGRES_PASSWORD: Least-Honesty-5
+      POSTGRES_DB: manga_reader
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql
+
+  valkey:
+    image: valkey/valkey:7-alpine3.23
+    container_name: manga_cache
+    ports:
+      - "6379:6379"
+    command: valkey-server --loglevel notice
+
+  nats:
+    image: nats:latest
+    container_name: manga_events
+    ports:
+      - "4222:4222"
+      - "8222:8222" 
+
+volumes:
+  pg_data:
