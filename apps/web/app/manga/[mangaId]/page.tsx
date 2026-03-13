@@ -3,6 +3,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
+import Image from 'next/image';
 import { getMangaDetails, getCoverUrl } from '@/lib/api';
 import { MangaDetails as MangaDetailsType } from '@/lib/types';
 
@@ -75,11 +76,13 @@ export default function MangaPage() {
         </Link>
 
         <div className="flex flex-col md:flex-row gap-6 mb-8">
-          <div className="w-48 flex-shrink-0">
-            <img
+          <div className="w-48 flex-shrink-0 relative aspect-[3/4]">
+            <Image
               src={getCoverUrl(manga.id, manga.cover_filename, 512)}
               alt={manga.title}
-              className="w-full rounded-lg shadow-lg"
+              fill
+              sizes="12rem"
+              className="object-cover rounded-lg shadow-lg"
             />
           </div>
           <div className="flex-1">

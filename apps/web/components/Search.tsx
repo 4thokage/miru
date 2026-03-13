@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import { useInfiniteQuery } from '@tanstack/react-query';
 import Link from 'next/link';
+import Image from 'next/image';
 import { searchManga, getCoverUrl } from '@/lib/api';
 import { SearchRequest, SearchResponse, Manga } from '@/lib/types';
 
@@ -150,11 +151,12 @@ function MangaCard({ manga }: { manga: Manga }) {
     <Link href={`/manga/${manga.id}`} className="block">
       <div className="group relative bg-zinc-100 dark:bg-zinc-900 rounded-lg overflow-hidden transition-transform hover:scale-105">
         <div className="aspect-[3/4] relative">
-          <img
+          <Image
             src={getCoverUrl(manga.id, manga.cover_filename)}
             alt={manga.title}
-            className="w-full h-full object-cover"
-            loading="lazy"
+            fill
+            sizes="(max-width: 768px) 50vw, 200px"
+            className="object-cover"
           />
         </div>
         <div className="p-2">
