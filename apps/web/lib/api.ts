@@ -26,7 +26,8 @@ export async function searchManga(params: SearchRequest): Promise<SearchResponse
 
 export function getCoverUrl(mangaId: string, fileName: string, size: 256 | 512 | 1024 = 256): string {
   if (!fileName) return '/placeholder-cover.svg';
-  return `https://uploads.mangadex.org/covers/${mangaId}/${fileName}.${size}.jpg`;
+  const url = `https://uploads.mangadex.org/covers/${mangaId}/${fileName}.${size}.jpg`;
+  return `/api/image-proxy?url=${encodeURIComponent(url)}`;
 }
 
 export async function getChapterPages(chapterId: string): Promise<ChapterPages> {

@@ -13,7 +13,7 @@ var Pool *pgxpool.Pool
 var logger = slog.Default()
 
 func InitDB(ctx context.Context) error {
-	connStr := getEnv("DATABASE_URL", "postgresql://ZeMiru:Least-Honesty-5@localhost:5432/manga_reader")
+	connStr := getEnv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/manga_reader")
 
 	config, err := pgxpool.ParseConfig(connStr)
 	if err != nil {
