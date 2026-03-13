@@ -1,0 +1,41 @@
+name: Deploy API
+on:
+  push:
+    paths: ['apps/api/**']
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          
+      - name: Build
+        run: |
+          cd apps/api
+          go build -o miru-api .
+          
+      - name: Deploy via rsync
+        uses: burnett01/rsync-deployments@5.2
+        with:
+          hosts: ${{ secrets.VPS_HOST }}
+          user: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: apps/api/miru-api
+          target: /opt/miru-api/
+          args: --delete
+          
+      - name: Restart service
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            systemctl restart miru-api
+            systemctl status miru-api --no-pager
