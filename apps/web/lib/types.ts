@@ -69,3 +69,56 @@ export interface MangaDetails {
   manga: Manga;
   chapters: Chapter[];
 }
+
+export interface Anime {
+  id: string;
+  title: string;
+  image: string;
+  year?: string;
+}
+
+export interface AnimeDetails {
+  id: string;
+  title: string;
+  image: string;
+  description: string;
+  status: string;
+  genres: string[];
+  episodes: AnimeEpisode[];
+  total_episodes: number;
+  released_year: string;
+}
+
+export interface AnimeEpisode {
+  id: string;
+  number: number;
+  title?: string;
+}
+
+export interface StreamSource {
+  server: string;
+  url: string;
+  quality: string;
+  is_m3u8: boolean;
+}
+
+export interface AnimeSearchResult {
+  animes: Anime[];
+  page: number;
+  has_next: boolean;
+}
+
+export interface RecentEpisode {
+  id: string;
+  anime_id: string;
+  anime_title: string;
+  image: string;
+  episode: number;
+  sub_or_dub: string;
+}
+
+export interface RecentResult {
+  episodes: RecentEpisode[];
+  page: number;
+  has_next: boolean;
+}

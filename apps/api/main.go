@@ -7,9 +7,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
+	"miru-api/internal/gogoanime"
 	"miru-api/internal/mangadex"
 	"miru-api/internal/storage"
 
@@ -46,6 +48,8 @@ func main() {
 		log.Printf("Warning: Failed to initialize tags: %v", err)
 	}
 
+	gogoClient := gogoanime.NewClient(redisClient)
+
 	progressRepo := storage.NewProgressRepository()
 
 	r := chi.NewRouter()
@@ -71,6 +75,13 @@ func main() {
 		r.Post("/progress", handleProgress(progressRepo))
 		r.Post("/chapter/{id}", handleChapter(mdxClient))
 		r.Get("/manga/{id}", handleMangaDetails(mdxClient))
+
+		r.Post("/anime/search", handleAnimeSearch(gogoClient))
+		r.Get("/anime/recent", handleAnimeRecent(gogoClient))
+		r.Get("/anime/popular", handleAnimePopular(gogoClient))
+		r.Get("/anime/{id}", handleAnimeDetails(gogoClient))
+		r.Get("/anime/{id}/episodes", handleAnimeEpisodes(gogoClient))
+		r.Get("/anime/episode/{id}/sources", handleAnimeSources(gogoClient))
 	})
 
 	port := mangadex.GetEnv("API_PORT", "8080")
@@ -249,5 +260,148 @@ func handleMangaDetails(client *mangadex.Client) http.HandlerFunc {
 			Success: true,
 			Data:    result,
 		})
+	}
+}
+
+type AnimeSearchRequest struct {
+	Query string `json:"query"`
+	Page  int    `json:"page"`
+}
+
+func handleAnimeSearch(client *gogoanime.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		var req AnimeSearchRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(APIResponse{Success: false, Error: "Invalid request body"})
+			return
+		}
+
+		if req.Page < 1 {
+			req.Page = 1
+		}
+
+		result, err := client.Search(r.Context(), req.Query, req.Page)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(APIResponse{Success: false, Error: err.Error()})
+			return
+		}
+
+		json.NewEncoder(w).Encode(APIResponse{Success: true, Data: result})
+	}
+}
+
+func handleAnimeRecent(client *gogoanime.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		pageStr := r.URL.Query().Get("page")
+		page := 1
+		if pageStr != "" {
+			if p, err := strconv.Atoi(pageStr); err == nil && p > 0 {
+				page = p
+			}
+		}
+
+		result, err := client.GetRecent(r.Context(), page)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(APIResponse{Success: false, Error: err.Error()})
+			return
+		}
+
+		json.NewEncoder(w).Encode(APIResponse{Success: true, Data: result})
+	}
+}
+
+func handleAnimePopular(client *gogoanime.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		pageStr := r.URL.Query().Get("page")
+		page := 1
+		if pageStr != "" {
+			if p, err := strconv.Atoi(pageStr); err == nil && p > 0 {
+				page = p
+			}
+		}
+
+		result, err := client.GetPopular(r.Context(), page)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(APIResponse{Success: false, Error: err.Error()})
+			return
+		}
+
+		json.NewEncoder(w).Encode(APIResponse{Success: true, Data: result})
+	}
+}
+
+func handleAnimeDetails(client *gogoanime.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		animeID := chi.URLParam(r, "id")
+		if animeID == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(APIResponse{Success: false, Error: "anime id is required"})
+			return
+		}
+
+		result, err := client.GetAnimeDetails(r.Context(), animeID)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(APIResponse{Success: false, Error: err.Error()})
+			return
+		}
+
+		json.NewEncoder(w).Encode(APIResponse{Success: true, Data: result})
+	}
+}
+
+func handleAnimeEpisodes(client *gogoanime.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		animeID := chi.URLParam(r, "id")
+		if animeID == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(APIResponse{Success: false, Error: "anime id is required"})
+			return
+		}
+
+		result, err := client.GetEpisodes(r.Context(), animeID)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(APIResponse{Success: false, Error: err.Error()})
+			return
+		}
+
+		json.NewEncoder(w).Encode(APIResponse{Success: true, Data: result})
+	}
+}
+
+func handleAnimeSources(client *gogoanime.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		episodeID := chi.URLParam(r, "id")
+		if episodeID == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(APIResponse{Success: false, Error: "episode id is required"})
+			return
+		}
+
+		result, err := client.GetStreamingLinks(r.Context(), episodeID)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(APIResponse{Success: false, Error: err.Error()})
+			return
+		}
+
+		json.NewEncoder(w).Encode(APIResponse{Success: true, Data: result})
 	}
 }
