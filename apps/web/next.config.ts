@@ -13,6 +13,16 @@ const nextConfig: NextConfig = {
         hostname: '*.mangadex.network',
         pathname: '/data/**',
       },
+      {
+        protocol: 'https',
+        hostname: 'gogocdn.net',
+        pathname: '/**',
+      },
+      {
+        protocol: 'https',
+        hostname: '*.gogocdn.net',
+        pathname: '/**',
+      },
     ],
   },
 };

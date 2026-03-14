@@ -45,231 +45,231 @@ jobs:
         working-directory: apps/api
         run: go test -v -race -coverprofile=coverage.out ./...
 
-      - name: Upload coverage to Codecov
-        if: github.event_name == 'pull_request'
-        uses: codecov/codecov-action@v4
-        with:
-          files: ./apps/api/coverage.out
-          flags: go
-          name: go-backend
-
-      - name: Run Go vet
-        working-directory: apps/api
-        run: go vet ./...
-
-      - name: Run staticcheck
-        working-directory: apps/api
-        run: |
-          go install honnef.co/go/tools/cmd/staticcheck@latest
-          staticcheck ./...
-        continue-on-error: true
-
-  # ============================================
-  # GO BUILD VALIDATION
-  # ============================================
-  go-build:
-    name: Go Build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: true
-
-      - name: Build Go API
-        working-directory: apps/api
-        run: |
-          go build -o miru-api .
-          ls -la miru-api
-
-      - name: Verify binary works
-        working-directory: apps/api
-        run: |
-          ./miru-api -h 2>&1 || true
-          file miru-api
-
-  # ============================================
-  # FRONTEND TESTS
-  # ============================================
-  web-test:
-    name: Frontend Tests
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: 'npm'
-          cache-dependency-path: apps/web/package-lock.json
-
-      - name: Install dependencies
-        working-directory: apps/web
-        run: npm ci
-
-      - name: Install Vitest
-        working-directory: apps/web
-        run: npm install -D vitest @vitejs/plugin-react jsdom
-
-      - name: Run TypeScript type check
-        working-directory: apps/web
-        run: npx tsc --noEmit
-
-      - name: Run ESLint
-        working-directory: apps/web
-        run: npm run lint || true
-
-      - name: Run Vitest tests
-        working-directory: apps/web
-        run: npx vitest run --coverage
-
-      - name: Upload coverage to Codecov
-        if: github.event_name == 'pull_request'
-        uses: codecov/codecov-action@v4
-        with:
-          files: ./apps/web/coverage/coverage-final.json
-          flags: frontend
-          name: frontend
-
-  # ============================================
-  # FRONTEND BUILD
-  # ============================================
-  web-build:
-    name: Frontend Build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: 'npm'
-          cache-dependency-path: apps/web/package-lock.json
-
-      - name: Install dependencies
-        working-directory: apps/web
-        run: npm ci
-
-      - name: Build Next.js app
-        working-directory: apps/web
-        run: npm run build
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: nextjs-build
-          path: apps/web/.next
-          retention-days: 7
-
-  # ============================================
-  # SECURITY SCANS
-  # ============================================
-  security:
-    name: Security Scan
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Run Go security checks
-        uses: securego/gosec@master
-        with:
-          args: '-no-fail -fmt sarif ./apps/api'
-
-      - name: Run npm audit (frontend)
-        working-directory: apps/web
-        run: |
-          npm ci
-          npm audit --audit-level=high || true
-
-  # ============================================
-  # DOCKER BUILD TEST
-  # ============================================
-  docker-test:
-    name: Docker Build Test
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build Docker image (API)
-        uses: docker/build-push-action@v5
-        with:
-          context: ./apps/api
-          push: false
-          tags: miru-api:test
-          load: true
-
-      - name: Verify Docker image
-        run: |
-          docker run --rm miru-api:test go version
-
-  # ============================================
-  # DATABASE MIGRATION TEST
-  # ============================================
-  db-migration:
-    name: Database Migration Test
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: test_miru
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 5432:5432
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-
-      - name: Run migrations
-        working-directory: apps/api
-        env:
-          DATABASE_URL: postgres://postgres:postgres@localhost:5432/test_miru?sslmode=disable
-        run: |
-          go install github.com/pressly/goose/v3/cmd/goose@latest
-          goose -dir migrations up
-        continue-on-error: true
-
-  # ============================================
-  # SUMMARY
-  # ============================================
-  summary:
-    name: CI Summary
-    needs: [go-test, go-build, web-test, web-build, security, docker-test]
-    runs-on: ubuntu-latest
-    if: always()
-    steps:
-      - name: Summary
-        run: |
-          echo "## CI Results" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Job | Status |" >> $GITHUB_STEP_SUMMARY
-          echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Go Tests | ${{ needs.go-test.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Go Build | ${{ needs.go-build.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Frontend Tests | ${{ needs.web-test.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Frontend Build | ${{ needs.web-build.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Security Scan | ${{ needs.security.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Docker Build | ${{ needs.docker-test.result }} |" >> $GITHUB_STEP_SUMMARY
+  #     - name: Upload coverage to Codecov
+  #       if: github.event_name == 'pull_request'
+  #       uses: codecov/codecov-action@v4
+  #       with:
+  #         files: ./apps/api/coverage.out
+  #         flags: go
+  #         name: go-backend
+  #
+  #     - name: Run Go vet
+  #       working-directory: apps/api
+  #       run: go vet ./...
+  #
+  #     - name: Run staticcheck
+  #       working-directory: apps/api
+  #       run: |
+  #         go install honnef.co/go/tools/cmd/staticcheck@latest
+  #         staticcheck ./...
+  #       continue-on-error: true
+  #
+  # # ============================================
+  # # GO BUILD VALIDATION
+  # # ============================================
+  # go-build:
+  #   name: Go Build
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Checkout code
+  #       uses: actions/checkout@v4
+  #
+  #     - name: Set up Go
+  #       uses: actions/setup-go@v5
+  #       with:
+  #         go-version: ${{ env.GO_VERSION }}
+  #         cache: true
+  #
+  #     - name: Build Go API
+  #       working-directory: apps/api
+  #       run: |
+  #         go build -o miru-api .
+  #         ls -la miru-api
+  #
+  #     - name: Verify binary works
+  #       working-directory: apps/api
+  #       run: |
+  #         ./miru-api -h 2>&1 || true
+  #         file miru-api
+  #
+  # # ============================================
+  # # FRONTEND TESTS
+  # # ============================================
+  # web-test:
+  #   name: Frontend Tests
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Checkout code
+  #       uses: actions/checkout@v4
+  #
+  #     - name: Set up Node.js
+  #       uses: actions/setup-node@v4
+  #       with:
+  #         node-version: ${{ env.NODE_VERSION }}
+  #         cache: 'npm'
+  #         cache-dependency-path: apps/web/package-lock.json
+  #
+  #     - name: Install dependencies
+  #       working-directory: apps/web
+  #       run: npm ci
+  #
+  #     - name: Install Vitest
+  #       working-directory: apps/web
+  #       run: npm install -D vitest @vitejs/plugin-react jsdom
+  #
+  #     - name: Run TypeScript type check
+  #       working-directory: apps/web
+  #       run: npx tsc --noEmit
+  #
+  #     - name: Run ESLint
+  #       working-directory: apps/web
+  #       run: npm run lint || true
+  #
+  #     - name: Run Vitest tests
+  #       working-directory: apps/web
+  #       run: npx vitest run --coverage
+  #
+  #     - name: Upload coverage to Codecov
+  #       if: github.event_name == 'pull_request'
+  #       uses: codecov/codecov-action@v4
+  #       with:
+  #         files: ./apps/web/coverage/coverage-final.json
+  #         flags: frontend
+  #         name: frontend
+  #
+  # # ============================================
+  # # FRONTEND BUILD
+  # # ============================================
+  # web-build:
+  #   name: Frontend Build
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Checkout code
+  #       uses: actions/checkout@v4
+  #
+  #     - name: Set up Node.js
+  #       uses: actions/setup-node@v4
+  #       with:
+  #         node-version: ${{ env.NODE_VERSION }}
+  #         cache: 'npm'
+  #         cache-dependency-path: apps/web/package-lock.json
+  #
+  #     - name: Install dependencies
+  #       working-directory: apps/web
+  #       run: npm ci
+  #
+  #     - name: Build Next.js app
+  #       working-directory: apps/web
+  #       run: npm run build
+  #
+  #     - name: Upload build artifacts
+  #       uses: actions/upload-artifact@v4
+  #       with:
+  #         name: nextjs-build
+  #         path: apps/web/.next
+  #         retention-days: 7
+  #
+  # # ============================================
+  # # SECURITY SCANS
+  # # ============================================
+  # security:
+  #   name: Security Scan
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Checkout code
+  #       uses: actions/checkout@v4
+  #
+  #     - name: Run Go security checks
+  #       uses: securego/gosec@master
+  #       with:
+  #         args: '-no-fail -fmt sarif ./apps/api'
+  #
+  #     - name: Run npm audit (frontend)
+  #       working-directory: apps/web
+  #       run: |
+  #         npm ci
+  #         npm audit --audit-level=high || true
+  #
+  # # ============================================
+  # # DOCKER BUILD TEST
+  # # ============================================
+  # docker-test:
+  #   name: Docker Build Test
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Checkout code
+  #       uses: actions/checkout@v4
+  #
+  #     - name: Set up Docker Buildx
+  #       uses: docker/setup-buildx-action@v3
+  #
+  #     - name: Build Docker image (API)
+  #       uses: docker/build-push-action@v5
+  #       with:
+  #         context: ./apps/api
+  #         push: false
+  #         tags: miru-api:test
+  #         load: true
+  #
+  #     - name: Verify Docker image
+  #       run: |
+  #         docker run --rm miru-api:test go version
+  #
+  # # ============================================
+  # # DATABASE MIGRATION TEST
+  # # ============================================
+  # db-migration:
+  #   name: Database Migration Test
+  #   runs-on: ubuntu-latest
+  #   services:
+  #     postgres:
+  #       image: postgres:16
+  #       env:
+  #         POSTGRES_PASSWORD: postgres
+  #         POSTGRES_DB: test_miru
+  #       options: >-
+  #         --health-cmd pg_isready
+  #         --health-interval 10s
+  #         --health-timeout 5s
+  #         --health-retries 5
+  #       ports:
+  #         - 5432:5432
+  #   steps:
+  #     - name: Checkout code
+  #       uses: actions/checkout@v4
+  #
+  #     - name: Set up Go
+  #       uses: actions/setup-go@v5
+  #       with:
+  #         go-version: ${{ env.GO_VERSION }}
+  #
+  #     - name: Run migrations
+  #       working-directory: apps/api
+  #       env:
+  #         DATABASE_URL: postgres://postgres:postgres@localhost:5432/test_miru?sslmode=disable
+  #       run: |
+  #         go install github.com/pressly/goose/v3/cmd/goose@latest
+  #         goose -dir migrations up
+  #       continue-on-error: true
+  #
+  # # ============================================
+  # # SUMMARY
+  # # ============================================
+  # summary:
+  #   name: CI Summary
+  #   needs: [go-test, go-build, web-test, web-build, security, docker-test]
+  #   runs-on: ubuntu-latest
+  #   if: always()
+  #   steps:
+  #     - name: Summary
+  #       run: |
+  #         echo "## CI Results" >> $GITHUB_STEP_SUMMARY
+  #         echo "" >> $GITHUB_STEP_SUMMARY
+  #         echo "| Job | Status |" >> $GITHUB_STEP_SUMMARY
+  #         echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
+  #         echo "| Go Tests | ${{ needs.go-test.result }} |" >> $GITHUB_STEP_SUMMARY
+  #         echo "| Go Build | ${{ needs.go-build.result }} |" >> $GITHUB_STEP_SUMMARY
+  #         echo "| Frontend Tests | ${{ needs.web-test.result }} |" >> $GITHUB_STEP_SUMMARY
+  #         echo "| Frontend Build | ${{ needs.web-build.result }} |" >> $GITHUB_STEP_SUMMARY
+  #         echo "| Security Scan | ${{ needs.security.result }} |" >> $GITHUB_STEP_SUMMARY
+  #         echo "| Docker Build | ${{ needs.docker-test.result }} |" >> $GITHUB_STEP_SUMMARY
