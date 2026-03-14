@@ -23,7 +23,7 @@ import (
 
 const (
 	BaseURL          = "https://gogocdn.net"
-	MainURL          = "https://gogoanime.sk"
+	MainURL          = "https://gogoanime.by"
 	AjaxURL          = "https://ajax.gogocdn.net"
 	SearchCacheTTL   = 5 * time.Minute
 	DetailsCacheTTL  = 15 * time.Minute
@@ -42,9 +42,7 @@ func NewClient(redisClient *redis.Client) *Client {
 	return &Client{
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
+			// Allow redirects up to 10 times (default behavior)
 		},
 		redis: redisClient,
 	}
@@ -60,31 +58,50 @@ func (c *Client) Search(ctx context.Context, query string, page int) (*scraper.S
 		return cached, nil
 	}
 
-	searchURL := fmt.Sprintf("%s/search.html?keyword=%s&page=%d", MainURL, url.QueryEscape(query), page)
+	searchURL := fmt.Sprintf("%s/?s=%s&page=%d", MainURL, url.QueryEscape(query), page)
 	doc, err := c.fetchDoc(ctx, searchURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch search page: %w", err)
 	}
 
 	var animes []scraper.Anime
-	doc.Find(".last_episodes .anime-card").Each(func(i int, s *goquery.Selection) {
-		link := s.Find("a").AttrOr("href", "")
-		id := extractAnimeID(link)
-		image := s.Find("img").AttrOr("src", "")
-		title := s.Find(".anime-title").Text()
-		year := s.Find(".released").Text()
+	doc.Find(".listupd article.bs, .listupd article.bsx").Each(func(i int, s *goquery.Selection) {
+		link, _ := s.Find("a").Attr("href")
+
+		// Try episode first, then series
+		id := extractAnimeIDFromEpisode(link)
+		if id == "" {
+			id = extractSeriesID(link)
+		}
+
+		image, _ := s.Find(".limit img").Attr("src")
+
+		// Get title - try h2 first (for search results), then .ttt > .tt (for recent/popular)
+		title := ""
+		h2 := s.Find("h2")
+		if h2.Length() > 0 {
+			title = strings.TrimSpace(h2.First().Text())
+		} else {
+			titleDiv := s.Find(".ttt > .tt")
+			titleDiv.Contents().Each(func(i int, sel *goquery.Selection) {
+				if sel.Is("h2") {
+					return
+				}
+				title += sel.Text()
+			})
+			title = cleanText(title)
+		}
 
 		if id != "" && title != "" {
 			animes = append(animes, scraper.Anime{
 				ID:    id,
-				Title: strings.TrimSpace(title),
+				Title: title,
 				Image: fixImageURL(image),
-				Year:  extractYear(strings.TrimSpace(year)),
 			})
 		}
 	})
 
-	hasNext := len(animes) >= 20
+	hasNext := doc.Find(".hpage .r").Length() > 0
 
 	result := &scraper.SearchResult{
 		Animes:  animes,
@@ -97,31 +114,53 @@ func (c *Client) Search(ctx context.Context, query string, page int) (*scraper.S
 }
 
 func (c *Client) GetAnimeDetails(ctx context.Context, id string) (*scraper.AnimeDetails, error) {
+	logger.Printf("[DEBUG] GetAnimeDetails: Starting for id=%s", id)
+	start := time.Now()
+
+	select {
+	case <-ctx.Done():
+		logger.Printf("[DEBUG] GetAnimeDetails: Context cancelled for id=%s", id)
+		return nil, ctx.Err()
+	default:
+	}
+
 	cacheKey := fmt.Sprintf("gogoanime:details:%s", id)
 	if cached, ok := c.getCache(ctx, cacheKey).(*scraper.AnimeDetails); ok {
+		logger.Printf("[DEBUG] GetAnimeDetails: Cache hit for id=%s", id)
 		return cached, nil
 	}
+	logger.Printf("[DEBUG] GetAnimeDetails: Cache miss for id=%s", id)
 
-	detailsURL := fmt.Sprintf("%s/category/%s", MainURL, id)
-	doc, err := c.fetchDoc(ctx, detailsURL)
+	timeoutCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+
+	detailsURL := fmt.Sprintf("%s/series/%s", MainURL, id)
+	logger.Printf("[DEBUG] GetAnimeDetails: Fetching %s", detailsURL)
+
+	doc, err := c.fetchDoc(timeoutCtx, detailsURL)
 	if err != nil {
+		logger.Printf("[DEBUG] GetAnimeDetails: Failed to fetch details for id=%s: %v", id, err)
 		return nil, fmt.Errorf("failed to fetch anime details: %w", err)
 	}
+	logger.Printf("[DEBUG] GetAnimeDetails: Successfully fetched document for id=%s", id)
 
-	title := doc.Find(".anime-info-title").Text()
-	image := doc.Find(".anime-info-body img").AttrOr("src", "")
-	description := doc.Find(".description").Text()
-	status := doc.Find(".status").Text()
+	title := doc.Find(".entry-title").Text()
+	image := doc.Find(".thumb img").AttrOr("src", "")
+	description := doc.Find(".ninfo").Text()
+	status := doc.Find(".spe").Text()
+	logger.Printf("[DEBUG] GetAnimeDetails: Extracted basic info for id=%s, title=%s", id, title)
 
 	var genres []string
-	doc.Find(".genres a").Each(func(i int, s *goquery.Selection) {
+	doc.Find(".genxed a").Each(func(i int, s *goquery.Selection) {
 		genre := strings.TrimSpace(s.Text())
 		if genre != "" {
 			genres = append(genres, genre)
 		}
 	})
 
-	episodes := c.extractEpisodes(ctx, id, doc)
+	logger.Printf("[DEBUG] GetAnimeDetails: Extracting episodes for id=%s", id)
+	episodes := c.extractEpisodes(timeoutCtx, id, doc)
+	logger.Printf("[DEBUG] GetAnimeDetails: Extracted %d episodes for id=%s", len(episodes), id)
 
 	releasedYear := ""
 	if yearMatch := regexp.MustCompile(`(\d{4})`).FindString(description); yearMatch != "" {
@@ -141,28 +180,56 @@ func (c *Client) GetAnimeDetails(ctx context.Context, id string) (*scraper.Anime
 	}
 
 	c.setCache(ctx, cacheKey, details, DetailsCacheTTL)
+	logger.Printf("[DEBUG] GetAnimeDetails: Completed for id=%s, found %d episodes (took %v)", id, len(episodes), time.Since(start))
 	return details, nil
 }
 
 func (c *Client) GetEpisodes(ctx context.Context, animeID string) ([]scraper.Episode, error) {
-	cacheKey := fmt.Sprintf("gogoanime:episodes:%s", animeID)
-	if cached, ok := c.getCache(ctx, cacheKey).([]scraper.Episode); ok {
-		return cached, nil
+	logger.Printf("[DEBUG] GetEpisodes: Starting for animeID=%s", animeID)
+	start := time.Now()
+
+	select {
+	case <-ctx.Done():
+		logger.Printf("[DEBUG] GetEpisodes: Context cancelled for animeID=%s", animeID)
+		return nil, ctx.Err()
+	default:
 	}
 
+	cacheKey := fmt.Sprintf("gogoanime:episodes:%s", animeID)
+	if cached, ok := c.getCache(ctx, cacheKey).([]scraper.Episode); ok {
+		logger.Printf("[DEBUG] GetEpisodes: Cache hit for animeID=%s", animeID)
+		return cached, nil
+	}
+	logger.Printf("[DEBUG] GetEpisodes: Cache miss for animeID=%s", animeID)
+
+	logger.Printf("[DEBUG] GetEpisodes: Calling GetAnimeDetails for animeID=%s", animeID)
 	details, err := c.GetAnimeDetails(ctx, animeID)
 	if err != nil {
+		logger.Printf("[DEBUG] GetEpisodes: GetAnimeDetails failed for animeID=%s: %v", animeID, err)
 		return nil, err
 	}
 
+	logger.Printf("[DEBUG] GetEpisodes: Got %d episodes from details for animeID=%s (took %v)", len(details.Episodes), animeID, time.Since(start))
 	c.setCache(ctx, cacheKey, details.Episodes, EpisodesCacheTTL)
 	return details.Episodes, nil
 }
 
 func (c *Client) extractEpisodes(ctx context.Context, id string, doc *goquery.Document) []scraper.Episode {
+	logger.Printf("[DEBUG] extractEpisodes: Starting for id=%s", id)
+	start := time.Now()
+
+	select {
+	case <-ctx.Done():
+		logger.Printf("[DEBUG] extractEpisodes: Context cancelled for id=%s", id)
+		return nil
+	default:
+	}
+
 	var episodes []scraper.Episode
 
-	episodesList := doc.Find("#episode_related li a")
+	episodesList := doc.Find(".episodes-container div a")
+	logger.Printf("[DEBUG] extractEpisodes: Found %d episodes in container for id=%s", episodesList.Length(), id)
+
 	if episodesList.Length() > 0 {
 		episodesList.Each(func(i int, s *goquery.Selection) {
 			href := s.AttrOr("href", "")
@@ -180,11 +247,24 @@ func (c *Client) extractEpisodes(ctx context.Context, id string, doc *goquery.Do
 		})
 	}
 
+	logger.Printf("[DEBUG] extractEpisodes: Found %d episodes from main container for id=%s", len(episodes), id)
+
 	if len(episodes) == 0 {
+		logger.Printf("[DEBUG] extractEpisodes: Trying AJAX fallback for id=%s", id)
 		ajaxURL := fmt.Sprintf("%s/ajax/load-list-episode?ep_start=0&ep_end=1000&id=%s&alias=%s", AjaxURL, id, id)
-		doc, err := c.fetchDoc(ctx, ajaxURL)
-		if err == nil {
-			doc.Find("li a").Each(func(i int, s *goquery.Selection) {
+		ajaxDoc, err := c.fetchDoc(ctx, ajaxURL)
+		if err != nil {
+			logger.Printf("[DEBUG] extractEpisodes: AJAX fallback failed for id=%s: %v", id, err)
+		} else {
+			ajaxList := ajaxDoc.Find("li a")
+			logger.Printf("[DEBUG] extractEpisodes: AJAX returned %d items for id=%s", ajaxList.Length(), id)
+			ajaxList.Each(func(i int, s *goquery.Selection) {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+
 				href := s.AttrOr("href", "")
 				epID := extractEpisodeID(href)
 				epNum := s.Find(".name").Text()
@@ -198,6 +278,7 @@ func (c *Client) extractEpisodes(ctx context.Context, id string, doc *goquery.Do
 					})
 				}
 			})
+			logger.Printf("[DEBUG] extractEpisodes: Found %d episodes from AJAX for id=%s", len(episodes), id)
 		}
 	}
 
@@ -205,56 +286,148 @@ func (c *Client) extractEpisodes(ctx context.Context, id string, doc *goquery.Do
 		episodes[i], episodes[j] = episodes[j], episodes[i]
 	}
 
+	logger.Printf("[DEBUG] extractEpisodes: Completed for id=%s, found %d episodes (took %v)", id, len(episodes), time.Since(start))
 	return episodes
 }
 
 func (c *Client) GetStreamingLinks(ctx context.Context, episodeID string) ([]scraper.StreamSource, error) {
-	cacheKey := fmt.Sprintf("gogoanime:stream:%s", episodeID)
-	if cached, ok := c.getCache(ctx, cacheKey).([]scraper.StreamSource); ok {
-		return cached, nil
+	logger.Printf("[DEBUG] GetStreamingLinks: Starting for episodeID=%s", episodeID)
+	start := time.Now()
+
+	select {
+	case <-ctx.Done():
+		logger.Printf("[DEBUG] GetStreamingLinks: Context cancelled for episodeID=%s", episodeID)
+		return nil, ctx.Err()
+	default:
 	}
 
+	cacheKey := fmt.Sprintf("gogoanime:stream:%s", episodeID)
+	if cached, ok := c.getCache(ctx, cacheKey).([]scraper.StreamSource); ok {
+		logger.Printf("[DEBUG] GetStreamingLinks: Cache hit for episodeID=%s", episodeID)
+		return cached, nil
+	}
+	logger.Printf("[DEBUG] GetStreamingLinks: Cache miss for episodeID=%s", episodeID)
+
+	timeoutCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	defer cancel()
+
 	episodeURL := fmt.Sprintf("%s/%s", MainURL, episodeID)
-	doc, err := c.fetchDoc(ctx, episodeURL)
+	logger.Printf("[DEBUG] GetStreamingLinks: Fetching episode page %s", episodeURL)
+
+	doc, err := c.fetchDoc(timeoutCtx, episodeURL)
 	if err != nil {
+		logger.Printf("[DEBUG] GetStreamingLinks: Failed to fetch episode page for %s: %v", episodeID, err)
 		return nil, fmt.Errorf("failed to fetch episode page: %w", err)
 	}
+	logger.Printf("[DEBUG] GetStreamingLinks: Successfully fetched episode page for %s", episodeID)
 
 	var sources []scraper.StreamSource
 
-	doc.Find(".anime_muti_link a").Each(func(i int, s *goquery.Selection) {
-		server := s.AttrOr("title", "")
-		embedData := s.AttrOr("data-value", "")
+	playerLinks := doc.Find(".player-type-link")
+	logger.Printf("[DEBUG] GetStreamingLinks: Found %d player-type-link elements for %s", playerLinks.Length(), episodeID)
 
-		if embedData == "" {
-			embedData = s.AttrOr("href", "")
+	playerLinks.Each(func(i int, s *goquery.Selection) {
+		select {
+		case <-timeoutCtx.Done():
+			logger.Printf("[DEBUG] GetStreamingLinks: Context timeout during player-type-link iteration %d for %s", i, episodeID)
+			return
+		default:
 		}
 
-		streamURL, quality := c.extractStreamURL(ctx, embedData, server)
-		if streamURL != "" {
+		server := s.Text()
+		if server == "" {
+			server = s.AttrOr("data-type", "")
+		}
+
+		encURL1 := s.AttrOr("data-encrypted-url1", "")
+		encURL2 := s.AttrOr("data-encrypted-url2", "")
+		encURL3 := s.AttrOr("data-encrypted-url3", "")
+		plainURL := s.AttrOr("data-plain-url", "")
+		dataType := s.AttrOr("data-type", "")
+
+		logger.Printf("[DEBUG] GetStreamingLinks: Processing server=%s, type=%s for %s", server, dataType, episodeID)
+
+		if encURL1 != "" {
+			logger.Printf("[DEBUG] GetStreamingLinks: Extracting encrypted stream URL for server=%s", server)
+			streamURL, quality := c.extractEncryptedStreamURL(timeoutCtx, encURL1, encURL2, encURL3, dataType, plainURL)
+			if streamURL != "" {
+				logger.Printf("[DEBUG] GetStreamingLinks: Got encrypted stream URL for server=%s: %s", server, streamURL)
+				sources = append(sources, scraper.StreamSource{
+					Server:  cleanServerName(server),
+					URL:     streamURL,
+					Quality: quality,
+					IsM3U8:  strings.HasSuffix(streamURL, ".m3u8"),
+				})
+			} else {
+				logger.Printf("[DEBUG] GetStreamingLinks: Failed to extract encrypted stream URL for server=%s", server)
+			}
+		} else if plainURL != "" {
+			logger.Printf("[DEBUG] GetStreamingLinks: Using plain URL for server=%s: %s", server, plainURL)
 			sources = append(sources, scraper.StreamSource{
 				Server:  cleanServerName(server),
-				URL:     streamURL,
-				Quality: quality,
-				IsM3U8:  strings.HasSuffix(streamURL, ".m3u8"),
+				URL:     plainURL,
+				Quality: "unknown",
+				IsM3U8:  strings.HasSuffix(plainURL, ".m3u8"),
 			})
 		}
 	})
 
 	if len(sources) == 0 {
+		mutiLinks := doc.Find(".anime_muti_link a")
+		logger.Printf("[DEBUG] GetStreamingLinks: No player-type-link sources, trying %d anime_muti_link elements for %s", mutiLinks.Length(), episodeID)
+
+		mutiLinks.Each(func(i int, s *goquery.Selection) {
+			select {
+			case <-timeoutCtx.Done():
+				logger.Printf("[DEBUG] GetStreamingLinks: Context timeout during anime_muti_link iteration %d for %s", i, episodeID)
+				return
+			default:
+			}
+
+			server := s.AttrOr("title", "")
+			embedData := s.AttrOr("data-value", "")
+
+			if embedData == "" {
+				embedData = s.AttrOr("href", "")
+			}
+
+			logger.Printf("[DEBUG] GetStreamingLinks: Processing anime_muti_link server=%s for %s", server, episodeID)
+			streamURL, quality := c.extractStreamURL(timeoutCtx, embedData, server)
+			if streamURL != "" {
+				logger.Printf("[DEBUG] GetStreamingLinks: Got stream URL from anime_muti_link for server=%s: %s", server, streamURL)
+				sources = append(sources, scraper.StreamSource{
+					Server:  cleanServerName(server),
+					URL:     streamURL,
+					Quality: quality,
+					IsM3U8:  strings.HasSuffix(streamURL, ".m3u8"),
+				})
+			} else {
+				logger.Printf("[DEBUG] GetStreamingLinks: Failed to extract stream URL from anime_muti_link for server=%s", server)
+			}
+		})
+	}
+
+	if len(sources) == 0 {
 		script := doc.Find("script").Text()
 		if match := regexp.MustCompile(`sources\s*:\s*\[(.*?)\]`).FindStringSubmatch(script); len(match) > 1 {
-			logger.Printf("Found inline sources in script for episode %s", episodeID)
+			logger.Printf("[DEBUG] GetStreamingLinks: Found inline sources in script for episode %s", episodeID)
 		}
 	}
 
 	sources = prioritizeServers(sources)
+	logger.Printf("[DEBUG] GetStreamingLinks: Completed for episodeID=%s, found %d sources (took %v)", episodeID, len(sources), time.Since(start))
 
 	c.setCache(ctx, cacheKey, sources, StreamCacheTTL)
 	return sources, nil
 }
 
 func (c *Client) extractStreamURL(ctx context.Context, embedData, server string) (string, string) {
+	select {
+	case <-ctx.Done():
+		return "", ""
+	default:
+	}
+
 	server = cleanServerName(server)
 
 	if strings.Contains(server, "streamsb") || strings.Contains(embedData, "streamsb") {
@@ -289,13 +462,100 @@ func (c *Client) extractStreamURL(ctx context.Context, embedData, server string)
 	return embedData, "unknown"
 }
 
+func (c *Client) extractEncryptedStreamURL(ctx context.Context, enc1, enc2, enc3, serverType, plainURL string) (string, string) {
+	logger.Printf("[DEBUG] extractEncryptedStreamURL: Starting for serverType=%s", serverType)
+	start := time.Now()
+
+	select {
+	case <-ctx.Done():
+		logger.Printf("[DEBUG] extractEncryptedStreamURL: Context cancelled")
+		return "", ""
+	default:
+	}
+
+	directTypes := []string{"embed", "kiwi"}
+
+	for _, dt := range directTypes {
+		if strings.EqualFold(serverType, dt) && plainURL != "" {
+			logger.Printf("[DEBUG] extractEncryptedStreamURL: Direct type %s with plainURL, returning immediately", dt)
+			return plainURL, "unknown"
+		}
+	}
+
+	apiURL := "https://9animetv.be/wp-content/plugins/video-player/includes/player/player.php"
+	logger.Printf("[DEBUG] extractEncryptedStreamURL: Calling API %s with serverType=%s", apiURL, serverType)
+
+	timeoutCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(timeoutCtx, "GET", apiURL, nil)
+	if err != nil {
+		logger.Printf("[DEBUG] extractEncryptedStreamURL: Failed to create request: %v", err)
+		return "", ""
+	}
+
+	q := req.URL.Query()
+	q.Set(serverType, enc1)
+	if enc2 != "" {
+		q.Set("url2", enc2)
+	}
+	if enc3 != "" {
+		q.Set("url3", enc3)
+	}
+	q.Set("user_agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.3 Safari/605.1.15")
+	q.Set("ref", "gogoanime.by")
+	req.URL.RawQuery = q.Encode()
+
+	logger.Printf("[DEBUG] extractEncryptedStreamURL: Sending request to API")
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		logger.Printf("[DEBUG] extractEncryptedStreamURL: API request failed: %v (took %v)", err, time.Since(start))
+		return "", ""
+	}
+	defer resp.Body.Close()
+
+	logger.Printf("[DEBUG] extractEncryptedStreamURL: API response status=%d (took %v)", resp.StatusCode, time.Since(start))
+
+	if resp.StatusCode != 200 {
+		logger.Printf("[DEBUG] extractEncryptedStreamURL: API returned non-200 status: %d", resp.StatusCode)
+		return "", ""
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	html := string(body)
+
+	if strings.Contains(html, "<iframe") {
+		if srcMatch := regexp.MustCompile(`src=["']([^"']+)["']`).FindStringSubmatch(html); len(srcMatch) > 1 {
+			logger.Printf("[DEBUG] extractEncryptedStreamURL: Found iframe src: %s (took %v)", srcMatch[1], time.Since(start))
+			return srcMatch[1], "unknown"
+		}
+	}
+
+	if m3u8Match := regexp.MustCompile(`["']([^"']+\.m3u8[^"]*)["']`).FindStringSubmatch(html); len(m3u8Match) > 1 {
+		logger.Printf("[DEBUG] extractEncryptedStreamURL: Found m3u8 URL: %s (took %v)", m3u8Match[1], time.Since(start))
+		return m3u8Match[1], "1080p"
+	}
+
+	logger.Printf("[DEBUG] extractEncryptedStreamURL: No stream URL found in response (took %v)", time.Since(start))
+	return "", ""
+}
+
 func (c *Client) extractStreamsb(ctx context.Context, embedURL string) (string, string) {
+	select {
+	case <-ctx.Done():
+		return "", ""
+	default:
+	}
+
 	parsedURL := extractURL(embedURL)
 	if parsedURL == "" {
 		return "", ""
 	}
 
-	doc, err := c.fetchDoc(ctx, parsedURL)
+	timeoutCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+
+	doc, err := c.fetchDoc(timeoutCtx, parsedURL)
 	if err != nil {
 		return "", ""
 	}
@@ -313,7 +573,7 @@ func (c *Client) extractStreamsb(ctx context.Context, embedURL string) (string, 
 	}
 
 	apiURL := strings.Replace(parsedURL, "/e/", "/sources/", 1)
-	apiDoc, err := c.fetchDoc(ctx, apiURL)
+	apiDoc, err := c.fetchDoc(timeoutCtx, apiURL)
 	if err == nil {
 		apiScript := apiDoc.Find("script").Text()
 		if m3u8Match := regexp.MustCompile(`["']([^"']+\.m3u8[^"']*)["']`).FindStringSubmatch(apiScript); len(m3u8Match) > 1 {
@@ -325,12 +585,21 @@ func (c *Client) extractStreamsb(ctx context.Context, embedURL string) (string, 
 }
 
 func (c *Client) extractDoodstream(ctx context.Context, embedURL string) (string, string) {
+	select {
+	case <-ctx.Done():
+		return "", ""
+	default:
+	}
+
 	parsedURL := extractURL(embedURL)
 	if parsedURL == "" {
 		return "", ""
 	}
 
-	req, _ := http.NewRequestWithContext(ctx, "GET", parsedURL, nil)
+	timeoutCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+
+	req, _ := http.NewRequestWithContext(timeoutCtx, "GET", parsedURL, nil)
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -352,12 +621,21 @@ func (c *Client) extractDoodstream(ctx context.Context, embedURL string) (string
 }
 
 func (c *Client) extractVoe(ctx context.Context, embedURL string) (string, string) {
+	select {
+	case <-ctx.Done():
+		return "", ""
+	default:
+	}
+
 	parsedURL := extractURL(embedURL)
 	if parsedURL == "" {
 		return "", ""
 	}
 
-	doc, err := c.fetchDoc(ctx, parsedURL)
+	timeoutCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+
+	doc, err := c.fetchDoc(timeoutCtx, parsedURL)
 	if err != nil {
 		return "", ""
 	}
@@ -382,25 +660,35 @@ func (c *Client) GetRecent(ctx context.Context, page int) (*scraper.RecentResult
 		return cached, nil
 	}
 
-	recentURL := fmt.Sprintf("%s/home.html?page=%d", MainURL, page)
+	recentURL := fmt.Sprintf("%s/?page=%d", MainURL, page)
 	doc, err := c.fetchDoc(ctx, recentURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch recent page: %w", err)
 	}
 
 	var episodes []scraper.RecentEpisode
-	doc.Find(".last_episodes .anime-card").Each(func(i int, s *goquery.Selection) {
+	doc.Find(".listupd article.bs").Each(func(i int, s *goquery.Selection) {
 		link := s.Find("a").AttrOr("href", "")
 		epID := extractEpisodeID(link)
-		animeID := extractAnimeID(link)
-		image := s.Find("img").AttrOr("src", "")
-		title := s.Find(".anime-title").Text()
-		epNumStr := s.Find(".episode-number").Text()
+		animeID := extractAnimeIDFromEpisode(link)
+		image := s.Find(".limit img").AttrOr("src", "")
 
+		// Get anime title from the div.tt text (not including h2)
+		titleDiv := s.Find(".ttt > .tt")
+		title := ""
+		titleDiv.Contents().Each(func(i int, sel *goquery.Selection) {
+			if sel.Is("h2") {
+				return
+			}
+			title += sel.Text()
+		})
+		title = cleanText(title)
+
+		epNumStr := s.Find(".limit .bt .epx").Text()
 		epNum := extractEpisodeNumber(epNumStr)
 
 		subOrDub := "sub"
-		if strings.Contains(strings.ToLower(epNumStr), "dub") {
+		if strings.Contains(strings.ToLower(s.Find(".limit .bt .sb").Text()), "dub") {
 			subOrDub = "dub"
 		}
 
@@ -408,7 +696,7 @@ func (c *Client) GetRecent(ctx context.Context, page int) (*scraper.RecentResult
 			episodes = append(episodes, scraper.RecentEpisode{
 				ID:         epID,
 				AnimeID:    animeID,
-				AnimeTitle: strings.TrimSpace(title),
+				AnimeTitle: title,
 				Image:      fixImageURL(image),
 				Episode:    epNum,
 				SubOrDub:   subOrDub,
@@ -416,7 +704,7 @@ func (c *Client) GetRecent(ctx context.Context, page int) (*scraper.RecentResult
 		}
 	})
 
-	hasNext := len(episodes) >= 20
+	hasNext := doc.Find(".hpage .r").Length() > 0
 
 	result := &scraper.RecentResult{
 		Episodes: episodes,
@@ -434,31 +722,39 @@ func (c *Client) GetPopular(ctx context.Context, page int) (*scraper.SearchResul
 		return cached, nil
 	}
 
-	popularURL := fmt.Sprintf("%s/popular.html?page=%d", MainURL, page)
+	// Popular page no longer exists, use homepage
+	popularURL := fmt.Sprintf("%s/?page=%d", MainURL, page)
 	doc, err := c.fetchDoc(ctx, popularURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch popular page: %w", err)
 	}
 
 	var animes []scraper.Anime
-	doc.Find(".last_episodes .anime-card").Each(func(i int, s *goquery.Selection) {
+	doc.Find(".listupd article.bs").Each(func(i int, s *goquery.Selection) {
 		link := s.Find("a").AttrOr("href", "")
-		id := extractAnimeID(link)
-		image := s.Find("img").AttrOr("src", "")
-		title := s.Find(".anime-title").Text()
-		year := s.Find(".released").Text()
+		id := extractAnimeIDFromEpisode(link)
+		image := s.Find(".limit img").AttrOr("src", "")
+
+		titleDiv := s.Find(".ttt > .tt")
+		title := ""
+		titleDiv.Contents().Each(func(i int, sel *goquery.Selection) {
+			if sel.Is("h2") {
+				return
+			}
+			title += sel.Text()
+		})
+		title = cleanText(title)
 
 		if id != "" && title != "" {
 			animes = append(animes, scraper.Anime{
 				ID:    id,
-				Title: strings.TrimSpace(title),
+				Title: title,
 				Image: fixImageURL(image),
-				Year:  extractYear(strings.TrimSpace(year)),
 			})
 		}
 	})
 
-	hasNext := len(animes) >= 20
+	hasNext := doc.Find(".hpage .r").Length() > 0
 
 	result := &scraper.SearchResult{
 		Animes:  animes,
@@ -470,9 +766,13 @@ func (c *Client) GetPopular(ctx context.Context, page int) (*scraper.SearchResul
 	return result, nil
 }
 
-func (c *Client) fetchDoc(ctx context.Context, url string) (*goquery.Document, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+func (c *Client) fetchDoc(ctx context.Context, fetchURL string) (*goquery.Document, error) {
+	logger.Printf("[DEBUG] fetchDoc: Starting request to %s", fetchURL)
+	start := time.Now()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", fetchURL, nil)
 	if err != nil {
+		logger.Printf("[DEBUG] fetchDoc: Failed to create request for %s: %v", fetchURL, err)
 		return nil, err
 	}
 
@@ -480,24 +780,27 @@ func (c *Client) fetchDoc(ctx context.Context, url string) (*goquery.Document, e
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.5")
 
+	logger.Printf("[DEBUG] fetchDoc: Sending request to %s", fetchURL)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		logger.Printf("[DEBUG] fetchDoc: Request failed for %s: %v (took %v)", fetchURL, err, time.Since(start))
 		return nil, err
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode == 302 {
-		redirect := resp.Header.Get("Location")
-		if redirect != "" {
-			return c.fetchDoc(ctx, redirect)
-		}
-	}
+	logger.Printf("[DEBUG] fetchDoc: Got response %d from %s (took %v)", resp.StatusCode, fetchURL, time.Since(start))
 
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("HTTP %d for %s", resp.StatusCode, fetchURL)
 	}
 
-	return goquery.NewDocumentFromReader(resp.Body)
+	doc, err := goquery.NewDocumentFromReader(resp.Body)
+	if err != nil {
+		logger.Printf("[DEBUG] fetchDoc: Failed to parse HTML from %s: %v", fetchURL, err)
+		return nil, err
+	}
+
+	logger.Printf("[DEBUG] fetchDoc: Successfully parsed document from %s (took %v)", fetchURL, time.Since(start))
+	return doc, nil
 }
 
 func (c *Client) getCache(ctx context.Context, key string) interface{} {
@@ -544,14 +847,39 @@ func extractAnimeID(link string) string {
 	return parts[len(parts)-1]
 }
 
-func extractEpisodeID(link string) string {
-	re := regexp.MustCompile(`-episode-\d+`)
-	match := re.FindString(link)
-	if match == "" {
-		re := regexp.MustCompile(`/(\w+-\d+)$`)
-		match = re.FindString(link)
+func extractAnimeIDFromEpisode(link string) string {
+	if link == "" {
+		return ""
 	}
-	return match
+	// Extract just the path
+	re := regexp.MustCompile(`/([^/]+)-episode-\d+`)
+	match := re.FindStringSubmatch(link)
+	if len(match) > 1 {
+		return match[1]
+	}
+	return ""
+}
+
+func extractSeriesID(link string) string {
+	if link == "" {
+		return ""
+	}
+	// Extract from /series/xxx/ URL
+	re := regexp.MustCompile(`/series/([^/]+)`)
+	match := re.FindStringSubmatch(link)
+	if len(match) > 1 {
+		return match[1]
+	}
+	return ""
+}
+
+func extractEpisodeID(link string) string {
+	re := regexp.MustCompile(`/([^/]+)-episode-(\d+)`)
+	match := re.FindStringSubmatch(link)
+	if match == nil {
+		return ""
+	}
+	return match[1] + "-episode-" + match[2]
 }
 
 func extractEpisodeNumber(text string) int {

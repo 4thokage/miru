@@ -63,4 +63,5 @@ type RecentEpisode struct {
 	Image      string `json:"image"`
 	Episode    int    `json:"episode"`
 	SubOrDub   string `json:"sub_or_dub"`
+	Type       string `json:"type,omitempty"`
 }
