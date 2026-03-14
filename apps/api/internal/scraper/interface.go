@@ -8,6 +8,7 @@ type AnimeProvider interface {
 	GetAnimeDetails(ctx context.Context, id string) (*AnimeDetails, error)
 	GetEpisodes(ctx context.Context, animeID string) ([]Episode, error)
 	GetStreamingLinks(ctx context.Context, episodeID string) ([]StreamSource, error)
+	GetDownloadLinks(ctx context.Context, episodeID string) ([]DownloadLink, error)
 	GetRecent(ctx context.Context, page int) (*RecentResult, error)
 	GetPopular(ctx context.Context, page int) (*SearchResult, error)
 }
@@ -48,6 +49,14 @@ type StreamSource struct {
 	URL     string `json:"url"`
 	Quality string `json:"quality"`
 	IsM3U8  bool   `json:"is_m3u8"`
+}
+
+type DownloadLink struct {
+	Server   string `json:"server"`
+	URL      string `json:"url"`
+	Quality  string `json:"quality"`
+	Size     string `json:"size,omitempty"`
+	Language string `json:"language,omitempty"`
 }
 
 type RecentResult struct {

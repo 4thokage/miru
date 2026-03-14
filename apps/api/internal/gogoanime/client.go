@@ -421,6 +421,96 @@ func (c *Client) GetStreamingLinks(ctx context.Context, episodeID string) ([]scr
 	return sources, nil
 }
 
+func (c *Client) GetDownloadLinks(ctx context.Context, episodeID string) ([]scraper.DownloadLink, error) {
+	logger.Printf("[DEBUG] GetDownloadLinks: Starting for episodeID=%s", episodeID)
+	start := time.Now()
+
+	select {
+	case <-ctx.Done():
+		logger.Printf("[DEBUG] GetDownloadLinks: Context cancelled for episodeID=%s", episodeID)
+		return nil, ctx.Err()
+	default:
+	}
+
+	cacheKey := fmt.Sprintf("gogoanime:download:%s", episodeID)
+	if cached, ok := c.getCache(ctx, cacheKey).([]scraper.DownloadLink); ok {
+		logger.Printf("[DEBUG] GetDownloadLinks: Cache hit for episodeID=%s", episodeID)
+		return cached, nil
+	}
+	logger.Printf("[DEBUG] GetDownloadLinks: Cache miss for episodeID=%s", episodeID)
+
+	timeoutCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	episodeURL := fmt.Sprintf("%s/%s", MainURL, episodeID)
+	logger.Printf("[DEBUG] GetDownloadLinks: Fetching episode page %s", episodeURL)
+
+	doc, err := c.fetchDoc(timeoutCtx, episodeURL)
+	if err != nil {
+		logger.Printf("[DEBUG] GetDownloadLinks: Failed to fetch episode page for %s: %v", episodeID, err)
+		return nil, fmt.Errorf("failed to fetch episode page: %w", err)
+	}
+	logger.Printf("[DEBUG] GetDownloadLinks: Successfully fetched episode page for %s", episodeID)
+
+	var downloads []scraper.DownloadLink
+
+	// Look for download box containers
+	dlBox := doc.Find(".dlbox")
+	logger.Printf("[DEBUG] GetDownloadLinks: Found %d dlbox elements for %s", dlBox.Length(), episodeID)
+
+	if dlBox.Length() > 0 {
+		dlBox.Find("ul li").Each(func(i int, s *goquery.Selection) {
+			select {
+			case <-timeoutCtx.Done():
+				return
+			default:
+			}
+
+			server := s.Find("span").Text()
+			linkElem := s.Find("a")
+			href := linkElem.AttrOr("href", "")
+			quality := linkElem.AttrOr("title", "")
+
+			if href != "" {
+				logger.Printf("[DEBUG] GetDownloadLinks: Found download link for server=%s", server)
+				downloads = append(downloads, scraper.DownloadLink{
+					Server:  cleanServerName(server),
+					URL:     href,
+					Quality: quality,
+				})
+			}
+		})
+	}
+
+	// Also check for any direct download links
+	if len(downloads) == 0 {
+		doc.Find("a[href*='download'], a[href*='.mp4'], a[href*='.mkv']").Each(func(i int, s *goquery.Selection) {
+			select {
+			case <-timeoutCtx.Done():
+				return
+			default:
+			}
+
+			href := s.AttrOr("href", "")
+			text := strings.TrimSpace(s.Text())
+
+			if href != "" && (strings.Contains(href, ".mp4") || strings.Contains(href, ".mkv") || strings.Contains(text, "Download")) {
+				logger.Printf("[DEBUG] GetDownloadLinks: Found direct download link: %s", href)
+				downloads = append(downloads, scraper.DownloadLink{
+					Server:  "download",
+					URL:     href,
+					Quality: "unknown",
+				})
+			}
+		})
+	}
+
+	logger.Printf("[DEBUG] GetDownloadLinks: Completed for episodeID=%s, found %d download links (took %v)", episodeID, len(downloads), time.Since(start))
+
+	c.setCache(ctx, cacheKey, downloads, StreamCacheTTL)
+	return downloads, nil
+}
+
 func (c *Client) extractStreamURL(ctx context.Context, embedData, server string) (string, string) {
 	select {
 	case <-ctx.Done():
@@ -524,13 +614,17 @@ func (c *Client) extractEncryptedStreamURL(ctx context.Context, enc1, enc2, enc3
 	body, _ := io.ReadAll(resp.Body)
 	html := string(body)
 
-	if strings.Contains(html, "<iframe") {
-		if srcMatch := regexp.MustCompile(`src=["']([^"']+)["']`).FindStringSubmatch(html); len(srcMatch) > 1 {
-			logger.Printf("[DEBUG] extractEncryptedStreamURL: Found iframe src: %s (took %v)", srcMatch[1], time.Since(start))
-			return srcMatch[1], "unknown"
-		}
+	logger.Printf("[DEBUG] extractEncryptedStreamURL: Response body length=%d", len(body))
+
+	// Look for iframe src specifically - the API returns an iframe with the actual player
+	// The response may also contain <script src="..."> tags (like JW Player library),
+	// so we need to be specific about finding the iframe src
+	if iframeMatch := regexp.MustCompile(`<iframe[^>]+src=["']([^"']+)["']`).FindStringSubmatch(html); len(iframeMatch) > 1 {
+		logger.Printf("[DEBUG] extractEncryptedStreamURL: Found iframe src: %s (took %v)", iframeMatch[1], time.Since(start))
+		return iframeMatch[1], "unknown"
 	}
 
+	// Fallback: look for any m3u8 URLs in the response
 	if m3u8Match := regexp.MustCompile(`["']([^"']+\.m3u8[^"]*)["']`).FindStringSubmatch(html); len(m3u8Match) > 1 {
 		logger.Printf("[DEBUG] extractEncryptedStreamURL: Found m3u8 URL: %s (took %v)", m3u8Match[1], time.Since(start))
 		return m3u8Match[1], "1080p"
@@ -908,12 +1002,33 @@ func fixImageURL(url string) string {
 	if url == "" {
 		return ""
 	}
+
+	// Handle protocol-relative URLs
 	if strings.HasPrefix(url, "//") {
-		return "https:" + url
+		url = "https:" + url
 	}
+
+	// Handle root-relative URLs
 	if strings.HasPrefix(url, "/") {
 		return BaseURL + url
 	}
+
+	// Convert WordPress Photon CDN URLs (i0.wp.com, i1.wp.com, i2.wp.com, i3.wp.com)
+	// back to the original gogoanime.by URL for better compatibility
+	// Photon URL format: https://i0.wp.com/gogoanime.by/wp-content/uploads/...
+	if strings.Contains(url, ".wp.com/gogoanime.by/") {
+		// Extract the path after the domain
+		parts := strings.SplitN(url, ".wp.com/gogoanime.by/", 2)
+		if len(parts) == 2 {
+			// Remove query parameters (like ?resize=246,350)
+			path := parts[1]
+			if idx := strings.Index(path, "?"); idx != -1 {
+				path = path[:idx]
+			}
+			url = BaseURL + "/" + path
+		}
+	}
+
 	return url
 }
 

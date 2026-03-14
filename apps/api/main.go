@@ -82,6 +82,7 @@ func main() {
 		r.Get("/anime/{id}", handleAnimeDetails(gogoClient))
 		r.Get("/anime/{id}/episodes", handleAnimeEpisodes(gogoClient))
 		r.Get("/anime/episode/{id}/sources", handleAnimeSources(gogoClient))
+		r.Get("/anime/episode/{id}/downloads", handleAnimeDownloads(gogoClient))
 	})
 
 	port := mangadex.GetEnv("API_PORT", "8080")
@@ -396,6 +397,28 @@ func handleAnimeSources(client *gogoanime.Client) http.HandlerFunc {
 		}
 
 		result, err := client.GetStreamingLinks(r.Context(), episodeID)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(APIResponse{Success: false, Error: err.Error()})
+			return
+		}
+
+		json.NewEncoder(w).Encode(APIResponse{Success: true, Data: result})
+	}
+}
+
+func handleAnimeDownloads(client *gogoanime.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		episodeID := chi.URLParam(r, "id")
+		if episodeID == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(APIResponse{Success: false, Error: "episode id is required"})
+			return
+		}
+
+		result, err := client.GetDownloadLinks(r.Context(), episodeID)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(APIResponse{Success: false, Error: err.Error()})
