@@ -578,11 +578,14 @@ func (c *Client) GetMangaDetails(ctx context.Context, mangaID string) (*MangaDet
 		CoverFileName: coverFileName,
 	}
 
-	chapters, err := c.GetMangaChapters(ctx, mangaID)
+	chapters, total, err := c.GetMangaChapters(ctx, mangaID, "en", 0, 100)
 	if err != nil {
 		logger.Warn("failed to fetch chapters", slog.String("error", err.Error()))
 		chapters = []Chapter{}
+		total = 0
 	}
+
+	_ = total // Total available for pagination if needed
 
 	return &MangaDetails{
 		Manga:    manga,
@@ -590,47 +593,57 @@ func (c *Client) GetMangaDetails(ctx context.Context, mangaID string) (*MangaDet
 	}, nil
 }
 
-func (c *Client) GetMangaChapters(ctx context.Context, mangaID string) ([]Chapter, error) {
-	feedURL := fmt.Sprintf("%s/manga/%s/feed?limit=100&includes[]=scanlation_group&order[chapter]=desc", MangaDexBaseURL, mangaID)
+func (c *Client) GetMangaChapters(ctx context.Context, mangaID string, language string, offset int, limit int) ([]Chapter, int, error) {
+	if language == "" {
+		language = "en"
+	}
+	if limit <= 0 || limit > 100 {
+		limit = 100
+	}
+
+	feedURL := fmt.Sprintf("%s/manga/%s/feed?limit=%d&offset=%d&translatedLanguage[]=%s&includes[]=scanlation_group&order[chapter]=desc",
+		MangaDexBaseURL, mangaID, limit, offset, language)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, feedURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return nil, 0, fmt.Errorf("failed to create request: %w", err)
 	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch chapters: %w", err)
+		return nil, 0, fmt.Errorf("failed to fetch chapters: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("mangadex API error: %d - %s", resp.StatusCode, string(body))
+		return nil, 0, fmt.Errorf("mangadex API error: %d - %s", resp.StatusCode, string(body))
 	}
 
 	var feedResp struct {
 		Result   string `json:"result"`
 		Response string `json:"response"`
+		Total    int    `json:"total"`
 		Data     []struct {
 			ID         string `json:"id"`
 			Attributes struct {
-				Chapter   string `json:"chapter"`
-				Title     string `json:"title"`
-				Volume    string `json:"volume"`
-				Pages     int    `json:"pages"`
-				Published string `json:"publishAt"`
+				Chapter            string `json:"chapter"`
+				Title              string `json:"title"`
+				Volume             string `json:"volume"`
+				Pages              int    `json:"pages"`
+				Published          string `json:"publishAt"`
+				TranslatedLanguage string `json:"translatedLanguage"`
 			} `json:"attributes"`
 		} `json:"data"`
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
+		return nil, 0, fmt.Errorf("failed to read response: %w", err)
 	}
 
 	if err := json.Unmarshal(body, &feedResp); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
+		return nil, 0, fmt.Errorf("failed to parse response: %w", err)
 	}
 
 	chapters := make([]Chapter, 0, len(feedResp.Data))
@@ -642,8 +655,9 @@ func (c *Client) GetMangaChapters(ctx context.Context, mangaID string) ([]Chapte
 			Volume:    ch.Attributes.Volume,
 			Pages:     ch.Attributes.Pages,
 			Published: ch.Attributes.Published,
+			Language:  ch.Attributes.TranslatedLanguage,
 		})
 	}
 
-	return chapters, nil
+	return chapters, feedResp.Total, nil
 }

@@ -1,15 +1,20 @@
 'use client';
 
+import { useState, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import Image from 'next/image';
 import { getMangaDetails, getCoverUrl } from '@/lib/api';
-import { MangaDetails as MangaDetailsType } from '@/lib/types';
+import { MangaDetails as MangaDetailsType, Chapter } from '@/lib/types';
+
+const CHAPTERS_PER_PAGE = 20;
 
 export default function MangaPage() {
   const params = useParams();
   const mangaId = params?.mangaId as string;
+  const [selectedLanguage, setSelectedLanguage] = useState<string>('en');
+  const [currentPage, setCurrentPage] = useState(1);
 
   const { data, isLoading, error, isError } = useQuery({
     queryKey: ['manga', mangaId],
@@ -17,6 +22,32 @@ export default function MangaPage() {
     enabled: !!mangaId,
     staleTime: 10 * 60 * 1000,
   });
+
+  // Get unique languages from chapters
+  const availableLanguages = useMemo(() => {
+    if (!data?.chapters) return [];
+    const languages = new Set(data.chapters.map((ch: Chapter) => ch.language || 'en'));
+    return Array.from(languages).sort();
+  }, [data?.chapters]);
+
+  // Filter chapters by selected language
+  const filteredChapters = useMemo(() => {
+    if (!data?.chapters) return [];
+    return data.chapters.filter((ch: Chapter) => (ch.language || 'en') === selectedLanguage);
+  }, [data?.chapters, selectedLanguage]);
+
+  // Paginate chapters
+  const totalPages = Math.ceil(filteredChapters.length / CHAPTERS_PER_PAGE);
+  const paginatedChapters = useMemo(() => {
+    const start = (currentPage - 1) * CHAPTERS_PER_PAGE;
+    return filteredChapters.slice(start, start + CHAPTERS_PER_PAGE);
+  }, [filteredChapters, currentPage]);
+
+  // Reset to page 1 when language changes
+  const handleLanguageChange = (lang: string) => {
+    setSelectedLanguage(lang);
+    setCurrentPage(1);
+  };
 
   if (!mangaId) {
     return (
@@ -66,7 +97,8 @@ export default function MangaPage() {
     );
   }
 
-  const { manga, chapters } = data;
+  const { manga } = data;
+  const hasMultipleLanguages = availableLanguages.length > 1;
 
   return (
     <div className="min-h-screen bg-zinc-50 dark:bg-black">
@@ -98,36 +130,115 @@ export default function MangaPage() {
         </div>
 
         <div>
-          <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100 mb-4">
-            Chapters ({chapters.length})
-          </h2>
-
-          {chapters.length === 0 ? (
-            <p className="text-zinc-500">No chapters available</p>
-          ) : (
-            <div className="space-y-2">
-              {chapters.map((chapter) => (
-                <Link
-                  key={chapter.id}
-                  href={`/read/${chapter.id}?mangaId=${manga.id}`}
-                  className="flex items-center justify-between p-3 bg-white dark:bg-zinc-900 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-4">
+            <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">
+              Chapters ({filteredChapters.length})
+            </h2>
+            
+            {hasMultipleLanguages && (
+              <div className="flex items-center gap-2">
+                <label htmlFor="language-filter" className="text-sm text-zinc-600 dark:text-zinc-400">
+                  Language:
+                </label>
+                <select
+                  id="language-filter"
+                  value={selectedLanguage}
+                  onChange={(e) => handleLanguageChange(e.target.value)}
+                  className="px-3 py-1.5 text-sm bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700 rounded-md text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 >
-                  <div className="flex items-center gap-3">
-                    <span className="text-zinc-900 dark:text-zinc-100 font-medium">
-                      {chapter.chapter ? `Ch. ${chapter.chapter}` : 'One-shot'}
-                    </span>
-                    {chapter.title && (
-                      <span className="text-zinc-500 dark:text-zinc-400 text-sm">
-                        {chapter.title}
+                  {availableLanguages.map((lang) => (
+                    <option key={lang} value={lang}>
+                      {lang === 'en' ? 'English' : lang}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+          </div>
+
+          {filteredChapters.length === 0 ? (
+            <p className="text-zinc-500">No chapters available in {selectedLanguage === 'en' ? 'English' : selectedLanguage}</p>
+          ) : (
+            <>
+              <div className="space-y-2">
+                {paginatedChapters.map((chapter) => (
+                  <Link
+                    key={chapter.id}
+                    href={`/read/${chapter.id}?mangaId=${manga.id}`}
+                    className="flex items-center justify-between p-3 bg-white dark:bg-zinc-900 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
+                  >
+                    <div className="flex items-center gap-3">
+                      <span className="text-zinc-900 dark:text-zinc-100 font-medium">
+                        {chapter.chapter ? `Ch. ${chapter.chapter}` : 'One-shot'}
                       </span>
-                    )}
+                      {chapter.title && (
+                        <span className="text-zinc-500 dark:text-zinc-400 text-sm">
+                          {chapter.title}
+                        </span>
+                      )}
+                    </div>
+                    <span className="text-zinc-400 text-sm">
+                      {new Date(chapter.published).toLocaleDateString()}
+                    </span>
+                  </Link>
+                ))}
+              </div>
+
+              {/* Pagination */}
+              {totalPages > 1 && (
+                <div className="flex items-center justify-center gap-2 mt-6">
+                  <button
+                    onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                    disabled={currentPage === 1}
+                    className="px-3 py-1.5 text-sm bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700 rounded-md text-zinc-900 dark:text-zinc-100 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-zinc-100 dark:hover:bg-zinc-700 transition-colors"
+                  >
+                    Previous
+                  </button>
+                  
+                  <div className="flex items-center gap-1">
+                    {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
+                      // Show pages around current page
+                      let pageNum;
+                      if (totalPages <= 5) {
+                        pageNum = i + 1;
+                      } else if (currentPage <= 3) {
+                        pageNum = i + 1;
+                      } else if (currentPage >= totalPages - 2) {
+                        pageNum = totalPages - 4 + i;
+                      } else {
+                        pageNum = currentPage - 2 + i;
+                      }
+                      
+                      return (
+                        <button
+                          key={pageNum}
+                          onClick={() => setCurrentPage(pageNum)}
+                          className={`w-8 h-8 text-sm rounded-md transition-colors ${
+                            currentPage === pageNum
+                              ? 'bg-blue-600 text-white'
+                              : 'bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700 text-zinc-900 dark:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-700'
+                          }`}
+                        >
+                          {pageNum}
+                        </button>
+                      );
+                    })}
                   </div>
-                  <span className="text-zinc-400 text-sm">
-                    {new Date(chapter.published).toLocaleDateString()}
-                  </span>
-                </Link>
-              ))}
-            </div>
+                  
+                  <button
+                    onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                    disabled={currentPage === totalPages}
+                    className="px-3 py-1.5 text-sm bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700 rounded-md text-zinc-900 dark:text-zinc-100 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-zinc-100 dark:hover:bg-zinc-700 transition-colors"
+                  >
+                    Next
+                  </button>
+                </div>
+              )}
+
+              <p className="text-center text-sm text-zinc-500 mt-2">
+                Page {currentPage} of {totalPages}
+              </p>
+            </>
           )}
         </div>
       </div>

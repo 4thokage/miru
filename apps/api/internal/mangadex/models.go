@@ -66,6 +66,7 @@ type Chapter struct {
 	Volume    string `json:"volume"`
 	Pages     int    `json:"pages"`
 	Published string `json:"published"`
+	Language  string `json:"language"`
 }
 
 type MangaDetails struct {

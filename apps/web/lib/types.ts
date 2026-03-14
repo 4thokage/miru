@@ -63,6 +63,7 @@ export interface Chapter {
   volume: string;
   pages: number;
   published: string;
+  language: string;
 }
 
 export interface MangaDetails {
