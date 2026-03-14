@@ -27,8 +27,8 @@ jobs:
           EXCLUDES: --exclude .git
           USER: ${{ secrets.VPS_USER }}
           HOST: ${{ secrets.VPS_HOST }}
-          LOCALPATH: apps/api/
-          REMOTEPATH: /opt/miru-api/
+          LOCALPATH: apps/api/miru-api
+          REMOTEPATH: /opt/miru-api/miru-api
           DEPLOY_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
           
       - name: Restart service
