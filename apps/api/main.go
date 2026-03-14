@@ -13,6 +13,7 @@ import (
 
 	"miru-api/internal/gogoanime"
 	"miru-api/internal/mangadex"
+	ratelimit "miru-api/internal/middleware"
 	"miru-api/internal/storage"
 
 	"github.com/go-chi/chi/v5"
@@ -63,6 +64,8 @@ func main() {
 		AllowCredentials: false,
 		MaxAge:           300,
 	}))
+
+	r.Use(ratelimit.NewRateLimitFromEnv())
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

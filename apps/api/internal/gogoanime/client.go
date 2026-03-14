@@ -1013,19 +1013,30 @@ func fixImageURL(url string) string {
 		return BaseURL + url
 	}
 
+	// If the URL already points to gogocdn, return as-is
+	if strings.Contains(url, "gogocdn.net") {
+		return url
+	}
+
 	// Convert WordPress Photon CDN URLs (i0.wp.com, i1.wp.com, i2.wp.com, i3.wp.com)
-	// back to the original gogoanime.by URL for better compatibility
+	// back to the original gogocdn URL for better compatibility and faster loading
 	// Photon URL format: https://i0.wp.com/gogoanime.by/wp-content/uploads/...
-	if strings.Contains(url, ".wp.com/gogoanime.by/") {
-		// Extract the path after the domain
-		parts := strings.SplitN(url, ".wp.com/gogoanime.by/", 2)
-		if len(parts) == 2 {
+	// Example: https://i1.wp.com/gogoanime.by/wp-content/uploads/2026/03/beastars.webp?resize=246,350
+	if strings.Contains(url, ".wp.com/") {
+		// Try to extract the path after gogoanime.by
+		if idx := strings.Index(url, "gogoanime.by/"); idx != -1 {
+			// Find query string position in original URL
+			pathStart := idx + len("gogoanime.by/")
+			path := url[pathStart:]
+
 			// Remove query parameters (like ?resize=246,350)
-			path := parts[1]
-			if idx := strings.Index(path, "?"); idx != -1 {
-				path = path[:idx]
+			if qIdx := strings.Index(path, "?"); qIdx != -1 {
+				path = path[:qIdx]
 			}
-			url = BaseURL + "/" + path
+
+			if path != "" {
+				return BaseURL + "/" + path
+			}
 		}
 	}
 
