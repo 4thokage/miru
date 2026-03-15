@@ -202,17 +202,12 @@ func TestFixImageURL(t *testing.T) {
 		expected string
 	}{
 		{
-			name:     "WordPress Photon CDN with query params",
-			input:    "https://i1.wp.com/gogoanime.by/wp-content/uploads/2026/03/beastars-final-season-part-2.webp?resize=246,350",
-			expected: "https://gogocdn.net/wp-content/uploads/2026/03/beastars-final-season-part-2.webp",
+			name:     "WordPress Photon CDN - pass through unchanged",
+			input:    "https://i1.wp.com/gogoanime.by/wp-content/uploads/2026/03/beastars.webp?resize=246,350",
+			expected: "https://i1.wp.com/gogoanime.by/wp-content/uploads/2026/03/beastars.webp?resize=246,350",
 		},
 		{
-			name:     "WordPress Photon CDN without query params",
-			input:    "https://i2.wp.com/gogoanime.by/wp-content/uploads/2023/01/naruto.jpg",
-			expected: "https://gogocdn.net/wp-content/uploads/2023/01/naruto.jpg",
-		},
-		{
-			name:     "Already gogocdn URL",
+			name:     "gogocdn URL - pass through",
 			input:    "https://gogocdn.net/images/naruto.jpg",
 			expected: "https://gogocdn.net/images/naruto.jpg",
 		},
@@ -230,11 +225,6 @@ func TestFixImageURL(t *testing.T) {
 			name:     "Empty URL",
 			input:    "",
 			expected: "",
-		},
-		{
-			name:     "i0.wp.com variant",
-			input:    "https://i0.wp.com/gogoanime.by/wp-content/uploads/2024/05/one-piece.webp?resize=300,450",
-			expected: "https://gogocdn.net/wp-content/uploads/2024/05/one-piece.webp",
 		},
 	}
 

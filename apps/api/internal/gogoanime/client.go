@@ -236,6 +236,9 @@ func (c *Client) extractEpisodes(ctx context.Context, id string, doc *goquery.Do
 			epID := extractEpisodeID(href)
 			epNum := s.Find(".name").Text()
 			num := extractEpisodeNumber(epNum)
+			if num == 0 {
+				num = extractEpisodeNumberFromID(epID)
+			}
 
 			if epID != "" {
 				episodes = append(episodes, scraper.Episode{
@@ -269,6 +272,9 @@ func (c *Client) extractEpisodes(ctx context.Context, id string, doc *goquery.Do
 				epID := extractEpisodeID(href)
 				epNum := s.Find(".name").Text()
 				num := extractEpisodeNumber(epNum)
+				if num == 0 {
+					num = extractEpisodeNumberFromID(epID)
+				}
 
 				if epID != "" {
 					episodes = append(episodes, scraper.Episode{
@@ -986,6 +992,16 @@ func extractEpisodeNumber(text string) int {
 	return num
 }
 
+func extractEpisodeNumberFromID(episodeID string) int {
+	re := regexp.MustCompile(`-episode-(\d+)$`)
+	match := re.FindStringSubmatch(episodeID)
+	if match == nil {
+		return 0
+	}
+	num, _ := strconv.Atoi(match[1])
+	return num
+}
+
 func extractYear(text string) string {
 	re := regexp.MustCompile(`\d{4}`)
 	match := re.FindString(text)
@@ -1011,33 +1027,6 @@ func fixImageURL(url string) string {
 	// Handle root-relative URLs
 	if strings.HasPrefix(url, "/") {
 		return BaseURL + url
-	}
-
-	// If the URL already points to gogocdn, return as-is
-	if strings.Contains(url, "gogocdn.net") {
-		return url
-	}
-
-	// Convert WordPress Photon CDN URLs (i0.wp.com, i1.wp.com, i2.wp.com, i3.wp.com)
-	// back to the original gogocdn URL for better compatibility and faster loading
-	// Photon URL format: https://i0.wp.com/gogoanime.by/wp-content/uploads/...
-	// Example: https://i1.wp.com/gogoanime.by/wp-content/uploads/2026/03/beastars.webp?resize=246,350
-	if strings.Contains(url, ".wp.com/") {
-		// Try to extract the path after gogoanime.by
-		if idx := strings.Index(url, "gogoanime.by/"); idx != -1 {
-			// Find query string position in original URL
-			pathStart := idx + len("gogoanime.by/")
-			path := url[pathStart:]
-
-			// Remove query parameters (like ?resize=246,350)
-			if qIdx := strings.Index(path, "?"); qIdx != -1 {
-				path = path[:qIdx]
-			}
-
-			if path != "" {
-				return BaseURL + "/" + path
-			}
-		}
 	}
 
 	return url

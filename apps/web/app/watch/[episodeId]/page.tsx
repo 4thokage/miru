@@ -1,15 +1,16 @@
 'use client';
 
 import { useQuery } from '@tanstack/react-query';
-import { useSearchParams, useRouter } from 'next/navigation';
+import { useSearchParams, useRouter, useParams } from 'next/navigation';
 import { useState } from 'react';
 import VideoPlayer from '@/components/VideoPlayer';
 import { getAnimeSources, getAnimeDetails, getAnimeEpisodes } from '@/lib/api';
 
 export default function WatchPage() {
+  const params = useParams();
   const searchParams = useSearchParams();
   const router = useRouter();
-  const episodeId = searchParams.get('episodeId') as string;
+  const episodeId = params.episodeId as string;
   const animeId = searchParams.get('animeId') as string;
 
   const [currentServer, setCurrentServer] = useState(0);

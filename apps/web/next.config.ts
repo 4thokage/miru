@@ -15,7 +15,7 @@ const nextConfig: NextConfig = {
       },
       {
         protocol: 'https',
-        hostname: 'gogocdn.net',
+        hostname: '*.wp.com',
         pathname: '/**',
       },
       {
